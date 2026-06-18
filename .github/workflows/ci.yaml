@@ -1,6 +1,7 @@
+---
 name: Docker Build and Push
 
-on:
+"on":
   push:
     branches:
       - main
@@ -10,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/your-app-name
+  IMAGE_NAME: ${{ secrets.DOCKER_USERNAME }}/microservices-demo
 
 jobs:
   docker-build-push:
