@@ -214,7 +214,7 @@ jobs:
   docker-build-push:
     name: Build - ${{ matrix.service.name }}
     runs-on: ubuntu-latest
-    needs: sonarcloud # Updated dependency to run after SonarCloud scans pass
+    # needs: sonarcloud # Updated dependency to run after SonarCloud scans pass
 
     strategy:
       fail-fast: false
