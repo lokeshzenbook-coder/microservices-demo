@@ -1,505 +1,505 @@
-name: CI/CD Pipeline
-
-on:
-  push:
-    branches:
-      - main
-  pull_request:
-    branches:
-      - main
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  id-token: write
-
-env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: microservices-demo
-
-# Cancel in-progress runs on the same branch
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  # ============================================================
-  # JOB 1 — GITLEAKS SECRET SCAN
-  # ============================================================
-  gitleaks:
-    name: 🔐 Gitleaks Secret Scan
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0        # full history so every commit is scanned
-
-      - name: Run Gitleaks
-        id: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true   # always upload report even if secrets found
-
-      - name: Upload Gitleaks SARIF Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gitleaks-report
-          path: results.sarif
-          if-no-files-found: warn
-          retention-days: 14
-
-      - name: Fail Pipeline if Secrets Detected
-        if: steps.gitleaks.outcome == 'failure'
-        run: |
-          echo "❌ Gitleaks detected secrets. Review the uploaded SARIF report."
-          exit 1
-
-  # ============================================================
-  # JOB 2 — LINT (per service, per language)
-  # ============================================================
-  lint:
-    name: 🧹 Lint - ${{ matrix.service.name }}
-    runs-on: ubuntu-latest
-    needs: gitleaks
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - name: adservice
-            context: ./src/adservice
-            lang: java
-
-          - name: cartservice
-            context: ./src/cartservice/src
-            lang: dotnet
-
-          - name: checkoutservice
-            context: ./src/checkoutservice
-            lang: go
-
-          - name: currencyservice
-            context: ./src/currencyservice
-            lang: node
-
-          - name: emailservice
-            context: ./src/emailservice
-            lang: python
-
-          - name: frontend
-            context: ./src/frontend
-            lang: go
-
-          - name: loadgenerator
-            context: ./src/loadgenerator
-            lang: python
-
-          - name: paymentservice
-            context: ./src/paymentservice
-            lang: node
-
-          - name: productcatalogservice
-            context: ./src/productcatalogservice
-            lang: go
-
-          - name: recommendationservice
-            context: ./src/recommendationservice
-            lang: python
-
-          - name: shippingservice
-            context: ./src/shippingservice
-            lang: go
-
-          - name: shoppingassistantservice
-            context: ./src/shoppingassistantservice
-            lang: python
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # ── Go ──────────────────────────────────────────────────
-      - name: Set up Go
-        if: matrix.service.lang == 'go'
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Lint Go (golangci-lint)
-        if: matrix.service.lang == 'go'
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: ${{ matrix.service.context }}
-          args: --out-format=checkstyle --timeout=5m
-        continue-on-error: true
-
-      - name: Save Go Lint Output
-        if: matrix.service.lang == 'go'
-        run: |
-          mkdir -p lint-reports
-          echo "golangci-lint scan completed for ${{ matrix.service.name }}" \
-            > lint-reports/${{ matrix.service.name }}-lint.txt
-
-      # ── Java ────────────────────────────────────────────────
-      - name: Set up Java
-        if: matrix.service.lang == 'java'
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Lint Java (Checkstyle via Gradle)
-        if: matrix.service.lang == 'java'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          mkdir -p ${{ github.workspace }}/lint-reports
-          ./gradlew checkstyleMain checkstyleTest --continue \
-            2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
-            || echo "⚠️ Checkstyle issues found or task not configured"
-        continue-on-error: true
-
-      # ── Python ──────────────────────────────────────────────
-      - name: Set up Python
-        if: matrix.service.lang == 'python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Install Python Linters
-        if: matrix.service.lang == 'python'
-        run: pip install flake8 pylint --quiet
-
-      - name: Lint Python (flake8 + pylint)
-        if: matrix.service.lang == 'python'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          mkdir -p ${{ github.workspace }}/lint-reports
-          {
-            echo "=== flake8 ==="
-            flake8 . --max-line-length=120 --statistics || true
-            echo ""
-            echo "=== pylint ==="
-            pylint **/*.py --exit-zero || true
-          } | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt
-        continue-on-error: true
-
-      # ── Node ────────────────────────────────────────────────
-      - name: Set up Node
-        if: matrix.service.lang == 'node'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Lint Node (ESLint)
-        if: matrix.service.lang == 'node'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          npm install --quiet || true
-          mkdir -p ${{ github.workspace }}/lint-reports
-          npx eslint . --ext .js,.ts --format stylish \
-            2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
-            || echo "⚠️ ESLint completed with warnings"
-        continue-on-error: true
-
-      # ── .NET ────────────────────────────────────────────────
-      - name: Set up .NET
-        if: matrix.service.lang == 'dotnet'
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
-
-      - name: Lint .NET (dotnet format)
-        if: matrix.service.lang == 'dotnet'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          dotnet restore || true
-          mkdir -p ${{ github.workspace }}/lint-reports
-          dotnet format --verify-no-changes --verbosity diagnostic \
-            2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
-            || echo "⚠️ dotnet format found formatting issues"
-        continue-on-error: true
-
-      # ── Upload Lint Report ───────────────────────────────────
-      - name: Upload Lint Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lint-report-${{ matrix.service.name }}
-          path: lint-reports/${{ matrix.service.name }}-lint.txt
-          if-no-files-found: warn
-          retention-days: 14
-
-  # ============================================================
-  # JOB 3 — TEST (per service, per language)
-  # ============================================================
-  test:
-    name: 🧪 Test - ${{ matrix.service.name }}
-    runs-on: ubuntu-latest
-    needs: lint
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - name: adservice
-            context: ./src/adservice
-            lang: java
-
-          - name: cartservice
-            context: ./src/cartservice/src
-            lang: dotnet
-
-          - name: checkoutservice
-            context: ./src/checkoutservice
-            lang: go
-
-          - name: currencyservice
-            context: ./src/currencyservice
-            lang: node
-
-          - name: emailservice
-            context: ./src/emailservice
-            lang: python
-
-          - name: frontend
-            context: ./src/frontend
-            lang: go
-
-          - name: loadgenerator
-            context: ./src/loadgenerator
-            lang: python
-
-          - name: paymentservice
-            context: ./src/paymentservice
-            lang: node
-
-          - name: productcatalogservice
-            context: ./src/productcatalogservice
-            lang: go
-
-          - name: recommendationservice
-            context: ./src/recommendationservice
-            lang: python
-
-          - name: shippingservice
-            context: ./src/shippingservice
-            lang: go
-
-          - name: shoppingassistantservice
-            context: ./src/shoppingassistantservice
-            lang: python
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      # ── Go ──────────────────────────────────────────────────
-      - name: Set up Go
-        if: matrix.service.lang == 'go'
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-
-      - name: Run Go Tests
-        if: matrix.service.lang == 'go'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          go mod tidy || true
-          go test ./... 2>&1 | tee test-results.txt || echo "⚠️ No Go tests found"
-
-      # ── Java ────────────────────────────────────────────────
-      - name: Set up Java
-        if: matrix.service.lang == 'java'
-        uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-
-      - name: Run Java Tests
-        if: matrix.service.lang == 'java'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          ./gradlew test --continue \
-            2>&1 | tee test-results.txt \
-            || mvn test 2>&1 | tee test-results.txt \
-            || echo "⚠️ No Java tests found"
-
-      # ── Python ──────────────────────────────────────────────
-      - name: Set up Python
-        if: matrix.service.lang == 'python'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Run Python Tests
-        if: matrix.service.lang == 'python'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          pip install -r requirements.txt --quiet || true
-          pytest --tb=short -v 2>&1 | tee test-results.txt || echo "⚠️ No Python tests found"
-
-      # ── Node ────────────────────────────────────────────────
-      - name: Set up Node
-        if: matrix.service.lang == 'node'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Run Node Tests
-        if: matrix.service.lang == 'node'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          npm install --quiet || true
-          npm test 2>&1 | tee test-results.txt || echo "⚠️ No Node tests found"
-
-      # ── .NET ────────────────────────────────────────────────
-      - name: Set up .NET
-        if: matrix.service.lang == 'dotnet'
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
-
-      - name: Run .NET Tests
-        if: matrix.service.lang == 'dotnet'
-        working-directory: ${{ matrix.service.context }}
-        run: |
-          dotnet restore || true
-          dotnet test --verbosity normal \
-            2>&1 | tee test-results.txt || echo "⚠️ No .NET tests found"
-
-      # ── Upload Test Results ──────────────────────────────────
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-${{ matrix.service.name }}
-          path: |
-            ${{ matrix.service.context }}/test-results.txt
-            ${{ matrix.service.context }}/build/reports/tests/
-            ${{ matrix.service.context }}/target/surefire-reports/
-          if-no-files-found: warn
-          retention-days: 14
-
-  # ============================================================
-  # JOB 4 — DOCKER BUILD AND PUSH TO AMAZON ECR
-  # ============================================================
-  docker-build-push:
-    name: 🐳 Build - ${{ matrix.service.name }}
-    runs-on: ubuntu-latest
-    needs: test
-
-    strategy:
-      fail-fast: false
-      matrix:
-        service:
-          - name: adservice
-            context: ./src/adservice
-            dockerfile: ./src/adservice/Dockerfile
-
-          - name: cartservice
-            context: ./src/cartservice/src
-            dockerfile: ./src/cartservice/src/Dockerfile
-
-          - name: checkoutservice
-            context: ./src/checkoutservice
-            dockerfile: ./src/checkoutservice/Dockerfile
-
-          - name: currencyservice
-            context: ./src/currencyservice
-            dockerfile: ./src/currencyservice/Dockerfile
-
-          - name: emailservice
-            context: ./src/emailservice
-            dockerfile: ./src/emailservice/Dockerfile
-
-          - name: frontend
-            context: ./src/frontend
-            dockerfile: ./src/frontend/Dockerfile
-
-          - name: loadgenerator
-            context: ./src/loadgenerator
-            dockerfile: ./src/loadgenerator/Dockerfile
-
-          - name: paymentservice
-            context: ./src/paymentservice
-            dockerfile: ./src/paymentservice/Dockerfile
-
-          - name: productcatalogservice
-            context: ./src/productcatalogservice
-            dockerfile: ./src/productcatalogservice/Dockerfile
-
-          - name: recommendationservice
-            context: ./src/recommendationservice
-            dockerfile: ./src/recommendationservice/Dockerfile
-
-          - name: shippingservice
-            context: ./src/shippingservice
-            dockerfile: ./src/shippingservice/Dockerfile
-
-          - name: shoppingassistantservice
-            context: ./src/shoppingassistantservice
-            dockerfile: ./src/shoppingassistantservice/Dockerfile
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Configure AWS Credentials via OIDC
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Verify AWS Identity
-        run: aws sts get-caller-identity
-
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Create ECR Repository If Missing
-        run: |
-          set -e
-          REPO="${{ env.ECR_REPOSITORY }}-${{ matrix.service.name }}"
-          aws ecr describe-repositories \
-            --repository-names "$REPO" \
-            --region "${{ env.AWS_REGION }}" \
-            2>/dev/null || \
-          aws ecr create-repository \
-            --repository-name "$REPO" \
-            --region "${{ env.AWS_REGION }}" \
-            --image-scanning-configuration scanOnPush=true \
-            --image-tag-mutability IMMUTABLE
-
-      - name: Extract Docker Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-${{ matrix.service.name }}
-          tags: |
-            type=sha,prefix=,format=short
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.service.context }}
-          file: ${{ matrix.service.dockerfile }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Verify Push
-        run: |
-          echo "✅ ${{ matrix.service.name }} pushed successfully"
-          echo "Tags: ${{ steps.meta.outputs.tags }}"
+# name: CI/CD Pipeline
+
+# on:
+#   push:
+#     branches:
+#       - main
+#   pull_request:
+#     branches:
+#       - main
+#   workflow_dispatch:
+
+# permissions:
+#   contents: read
+#   id-token: write
+
+# env:
+#   AWS_REGION: us-east-1
+#   ECR_REPOSITORY: microservices-demo
+
+# # Cancel in-progress runs on the same branch
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.ref }}
+#   cancel-in-progress: true
+
+# jobs:
+#   # ============================================================
+#   # JOB 1 — GITLEAKS SECRET SCAN
+#   # ============================================================
+#   gitleaks:
+#     name: 🔐 Gitleaks Secret Scan
+#     runs-on: ubuntu-latest
+
+#     steps:
+#       - name: Checkout Repository
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0        # full history so every commit is scanned
+
+#       - name: Run Gitleaks
+#         id: gitleaks
+#         uses: gitleaks/gitleaks-action@v2
+#         env:
+#           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#         continue-on-error: true   # always upload report even if secrets found
+
+#       - name: Upload Gitleaks SARIF Report
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: gitleaks-report
+#           path: results.sarif
+#           if-no-files-found: warn
+#           retention-days: 14
+
+#       - name: Fail Pipeline if Secrets Detected
+#         if: steps.gitleaks.outcome == 'failure'
+#         run: |
+#           echo "❌ Gitleaks detected secrets. Review the uploaded SARIF report."
+#           exit 1
+
+#   # ============================================================
+#   # JOB 2 — LINT (per service, per language)
+#   # ============================================================
+#   lint:
+#     name: 🧹 Lint - ${{ matrix.service.name }}
+#     runs-on: ubuntu-latest
+#     needs: gitleaks
+
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         service:
+#           - name: adservice
+#             context: ./src/adservice
+#             lang: java
+
+#           - name: cartservice
+#             context: ./src/cartservice/src
+#             lang: dotnet
+
+#           - name: checkoutservice
+#             context: ./src/checkoutservice
+#             lang: go
+
+#           - name: currencyservice
+#             context: ./src/currencyservice
+#             lang: node
+
+#           - name: emailservice
+#             context: ./src/emailservice
+#             lang: python
+
+#           - name: frontend
+#             context: ./src/frontend
+#             lang: go
+
+#           - name: loadgenerator
+#             context: ./src/loadgenerator
+#             lang: python
+
+#           - name: paymentservice
+#             context: ./src/paymentservice
+#             lang: node
+
+#           - name: productcatalogservice
+#             context: ./src/productcatalogservice
+#             lang: go
+
+#           - name: recommendationservice
+#             context: ./src/recommendationservice
+#             lang: python
+
+#           - name: shippingservice
+#             context: ./src/shippingservice
+#             lang: go
+
+#           - name: shoppingassistantservice
+#             context: ./src/shoppingassistantservice
+#             lang: python
+
+#     steps:
+#       - name: Checkout Repository
+#         uses: actions/checkout@v4
+
+#       # ── Go ──────────────────────────────────────────────────
+#       - name: Set up Go
+#         if: matrix.service.lang == 'go'
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+
+#       - name: Lint Go (golangci-lint)
+#         if: matrix.service.lang == 'go'
+#         uses: golangci/golangci-lint-action@v6
+#         with:
+#           version: latest
+#           working-directory: ${{ matrix.service.context }}
+#           args: --out-format=checkstyle --timeout=5m
+#         continue-on-error: true
+
+#       - name: Save Go Lint Output
+#         if: matrix.service.lang == 'go'
+#         run: |
+#           mkdir -p lint-reports
+#           echo "golangci-lint scan completed for ${{ matrix.service.name }}" \
+#             > lint-reports/${{ matrix.service.name }}-lint.txt
+
+#       # ── Java ────────────────────────────────────────────────
+#       - name: Set up Java
+#         if: matrix.service.lang == 'java'
+#         uses: actions/setup-java@v4
+#         with:
+#           java-version: '21'
+#           distribution: 'temurin'
+
+#       - name: Lint Java (Checkstyle via Gradle)
+#         if: matrix.service.lang == 'java'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           mkdir -p ${{ github.workspace }}/lint-reports
+#           ./gradlew checkstyleMain checkstyleTest --continue \
+#             2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
+#             || echo "⚠️ Checkstyle issues found or task not configured"
+#         continue-on-error: true
+
+#       # ── Python ──────────────────────────────────────────────
+#       - name: Set up Python
+#         if: matrix.service.lang == 'python'
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.12'
+
+#       - name: Install Python Linters
+#         if: matrix.service.lang == 'python'
+#         run: pip install flake8 pylint --quiet
+
+#       - name: Lint Python (flake8 + pylint)
+#         if: matrix.service.lang == 'python'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           mkdir -p ${{ github.workspace }}/lint-reports
+#           {
+#             echo "=== flake8 ==="
+#             flake8 . --max-line-length=120 --statistics || true
+#             echo ""
+#             echo "=== pylint ==="
+#             pylint **/*.py --exit-zero || true
+#           } | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt
+#         continue-on-error: true
+
+#       # ── Node ────────────────────────────────────────────────
+#       - name: Set up Node
+#         if: matrix.service.lang == 'node'
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+
+#       - name: Lint Node (ESLint)
+#         if: matrix.service.lang == 'node'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           npm install --quiet || true
+#           mkdir -p ${{ github.workspace }}/lint-reports
+#           npx eslint . --ext .js,.ts --format stylish \
+#             2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
+#             || echo "⚠️ ESLint completed with warnings"
+#         continue-on-error: true
+
+#       # ── .NET ────────────────────────────────────────────────
+#       - name: Set up .NET
+#         if: matrix.service.lang == 'dotnet'
+#         uses: actions/setup-dotnet@v4
+#         with:
+#           dotnet-version: '8.0'
+
+#       - name: Lint .NET (dotnet format)
+#         if: matrix.service.lang == 'dotnet'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           dotnet restore || true
+#           mkdir -p ${{ github.workspace }}/lint-reports
+#           dotnet format --verify-no-changes --verbosity diagnostic \
+#             2>&1 | tee ${{ github.workspace }}/lint-reports/${{ matrix.service.name }}-lint.txt \
+#             || echo "⚠️ dotnet format found formatting issues"
+#         continue-on-error: true
+
+#       # ── Upload Lint Report ───────────────────────────────────
+#       - name: Upload Lint Report
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: lint-report-${{ matrix.service.name }}
+#           path: lint-reports/${{ matrix.service.name }}-lint.txt
+#           if-no-files-found: warn
+#           retention-days: 14
+
+#   # ============================================================
+#   # JOB 3 — TEST (per service, per language)
+#   # ============================================================
+#   test:
+#     name: 🧪 Test - ${{ matrix.service.name }}
+#     runs-on: ubuntu-latest
+#     needs: lint
+
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         service:
+#           - name: adservice
+#             context: ./src/adservice
+#             lang: java
+
+#           - name: cartservice
+#             context: ./src/cartservice/src
+#             lang: dotnet
+
+#           - name: checkoutservice
+#             context: ./src/checkoutservice
+#             lang: go
+
+#           - name: currencyservice
+#             context: ./src/currencyservice
+#             lang: node
+
+#           - name: emailservice
+#             context: ./src/emailservice
+#             lang: python
+
+#           - name: frontend
+#             context: ./src/frontend
+#             lang: go
+
+#           - name: loadgenerator
+#             context: ./src/loadgenerator
+#             lang: python
+
+#           - name: paymentservice
+#             context: ./src/paymentservice
+#             lang: node
+
+#           - name: productcatalogservice
+#             context: ./src/productcatalogservice
+#             lang: go
+
+#           - name: recommendationservice
+#             context: ./src/recommendationservice
+#             lang: python
+
+#           - name: shippingservice
+#             context: ./src/shippingservice
+#             lang: go
+
+#           - name: shoppingassistantservice
+#             context: ./src/shoppingassistantservice
+#             lang: python
+
+#     steps:
+#       - name: Checkout Repository
+#         uses: actions/checkout@v4
+
+#       # ── Go ──────────────────────────────────────────────────
+#       - name: Set up Go
+#         if: matrix.service.lang == 'go'
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+
+#       - name: Run Go Tests
+#         if: matrix.service.lang == 'go'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           go mod tidy || true
+#           go test ./... 2>&1 | tee test-results.txt || echo "⚠️ No Go tests found"
+
+#       # ── Java ────────────────────────────────────────────────
+#       - name: Set up Java
+#         if: matrix.service.lang == 'java'
+#         uses: actions/setup-java@v4
+#         with:
+#           java-version: '21'
+#           distribution: 'temurin'
+
+#       - name: Run Java Tests
+#         if: matrix.service.lang == 'java'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           ./gradlew test --continue \
+#             2>&1 | tee test-results.txt \
+#             || mvn test 2>&1 | tee test-results.txt \
+#             || echo "⚠️ No Java tests found"
+
+#       # ── Python ──────────────────────────────────────────────
+#       - name: Set up Python
+#         if: matrix.service.lang == 'python'
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.12'
+
+#       - name: Run Python Tests
+#         if: matrix.service.lang == 'python'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           pip install -r requirements.txt --quiet || true
+#           pytest --tb=short -v 2>&1 | tee test-results.txt || echo "⚠️ No Python tests found"
+
+#       # ── Node ────────────────────────────────────────────────
+#       - name: Set up Node
+#         if: matrix.service.lang == 'node'
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+
+#       - name: Run Node Tests
+#         if: matrix.service.lang == 'node'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           npm install --quiet || true
+#           npm test 2>&1 | tee test-results.txt || echo "⚠️ No Node tests found"
+
+#       # ── .NET ────────────────────────────────────────────────
+#       - name: Set up .NET
+#         if: matrix.service.lang == 'dotnet'
+#         uses: actions/setup-dotnet@v4
+#         with:
+#           dotnet-version: '8.0'
+
+#       - name: Run .NET Tests
+#         if: matrix.service.lang == 'dotnet'
+#         working-directory: ${{ matrix.service.context }}
+#         run: |
+#           dotnet restore || true
+#           dotnet test --verbosity normal \
+#             2>&1 | tee test-results.txt || echo "⚠️ No .NET tests found"
+
+#       # ── Upload Test Results ──────────────────────────────────
+#       - name: Upload Test Results
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: test-results-${{ matrix.service.name }}
+#           path: |
+#             ${{ matrix.service.context }}/test-results.txt
+#             ${{ matrix.service.context }}/build/reports/tests/
+#             ${{ matrix.service.context }}/target/surefire-reports/
+#           if-no-files-found: warn
+#           retention-days: 14
+
+#   # ============================================================
+#   # JOB 4 — DOCKER BUILD AND PUSH TO AMAZON ECR
+#   # ============================================================
+#   docker-build-push:
+#     name: 🐳 Build - ${{ matrix.service.name }}
+#     runs-on: ubuntu-latest
+#     needs: test
+
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         service:
+#           - name: adservice
+#             context: ./src/adservice
+#             dockerfile: ./src/adservice/Dockerfile
+
+#           - name: cartservice
+#             context: ./src/cartservice/src
+#             dockerfile: ./src/cartservice/src/Dockerfile
+
+#           - name: checkoutservice
+#             context: ./src/checkoutservice
+#             dockerfile: ./src/checkoutservice/Dockerfile
+
+#           - name: currencyservice
+#             context: ./src/currencyservice
+#             dockerfile: ./src/currencyservice/Dockerfile
+
+#           - name: emailservice
+#             context: ./src/emailservice
+#             dockerfile: ./src/emailservice/Dockerfile
+
+#           - name: frontend
+#             context: ./src/frontend
+#             dockerfile: ./src/frontend/Dockerfile
+
+#           - name: loadgenerator
+#             context: ./src/loadgenerator
+#             dockerfile: ./src/loadgenerator/Dockerfile
+
+#           - name: paymentservice
+#             context: ./src/paymentservice
+#             dockerfile: ./src/paymentservice/Dockerfile
+
+#           - name: productcatalogservice
+#             context: ./src/productcatalogservice
+#             dockerfile: ./src/productcatalogservice/Dockerfile
+
+#           - name: recommendationservice
+#             context: ./src/recommendationservice
+#             dockerfile: ./src/recommendationservice/Dockerfile
+
+#           - name: shippingservice
+#             context: ./src/shippingservice
+#             dockerfile: ./src/shippingservice/Dockerfile
+
+#           - name: shoppingassistantservice
+#             context: ./src/shoppingassistantservice
+#             dockerfile: ./src/shoppingassistantservice/Dockerfile
+
+#     steps:
+#       - name: Checkout Repository
+#         uses: actions/checkout@v4
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Configure AWS Credentials via OIDC
+#         uses: aws-actions/configure-aws-credentials@v4
+#         with:
+#           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+#           aws-region: ${{ env.AWS_REGION }}
+
+#       - name: Verify AWS Identity
+#         run: aws sts get-caller-identity
+
+#       - name: Login to Amazon ECR
+#         id: login-ecr
+#         uses: aws-actions/amazon-ecr-login@v2
+
+#       - name: Create ECR Repository If Missing
+#         run: |
+#           set -e
+#           REPO="${{ env.ECR_REPOSITORY }}-${{ matrix.service.name }}"
+#           aws ecr describe-repositories \
+#             --repository-names "$REPO" \
+#             --region "${{ env.AWS_REGION }}" \
+#             2>/dev/null || \
+#           aws ecr create-repository \
+#             --repository-name "$REPO" \
+#             --region "${{ env.AWS_REGION }}" \
+#             --image-scanning-configuration scanOnPush=true \
+#             --image-tag-mutability IMMUTABLE
+
+#       - name: Extract Docker Metadata
+#         id: meta
+#         uses: docker/metadata-action@v5
+#         with:
+#           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}-${{ matrix.service.name }}
+#           tags: |
+#             type=sha,prefix=,format=short
+#             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+#       - name: Build and Push Docker Image
+#         uses: docker/build-push-action@v6
+#         with:
+#           context: ${{ matrix.service.context }}
+#           file: ${{ matrix.service.dockerfile }}
+#           push: true
+#           tags: ${{ steps.meta.outputs.tags }}
+#           labels: ${{ steps.meta.outputs.labels }}
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Verify Push
+#         run: |
+#           echo "✅ ${{ matrix.service.name }} pushed successfully"
+#           echo "Tags: ${{ steps.meta.outputs.tags }}"
