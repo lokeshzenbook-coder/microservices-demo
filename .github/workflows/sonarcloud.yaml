@@ -1,1163 +1,1163 @@
-# =============================================================================
-# GitHub Actions CI/CD Pipeline — microservices-demo
-# Pipeline: Test → SonarQube → Trivy → Docker Build & Push (Docker Hub)
-# Services: adservice | cartservice | checkoutservice | currencyservice |
-#           emailservice | frontend | loadgenerator | paymentservice |
-#           productcatalogservice | recommendationservice | shippingservice
-# Author  : Lokesh (lokeshzenbook)
-# =============================================================================
-
-name: Microservices CI/CD Pipeline
-
-on:
-  push:
-    branches: [main, develop]
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
-
-# ─────────────────────────────────────────────
-# Global defaults
-# ─────────────────────────────────────────────
-env:
-  DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}   # lokeshzenbook
-  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}              # https://sonarcloud.io
-  IMAGE_TAG: ${{ github.sha }}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# JOB 1 — Detect which services changed (path filter)
-# ─────────────────────────────────────────────────────────────────────────────
-jobs:
-  detect-changes:
-    name: "Detect Changed Services"
-    runs-on: ubuntu-latest
-    outputs:
-      adservice:             ${{ steps.filter.outputs.adservice }}
-      cartservice:           ${{ steps.filter.outputs.cartservice }}
-      checkoutservice:       ${{ steps.filter.outputs.checkoutservice }}
-      currencyservice:       ${{ steps.filter.outputs.currencyservice }}
-      emailservice:          ${{ steps.filter.outputs.emailservice }}
-      frontend:              ${{ steps.filter.outputs.frontend }}
-      loadgenerator:         ${{ steps.filter.outputs.loadgenerator }}
-      paymentservice:        ${{ steps.filter.outputs.paymentservice }}
-      productcatalogservice: ${{ steps.filter.outputs.productcatalogservice }}
-      recommendationservice: ${{ steps.filter.outputs.recommendationservice }}
-      shippingservice:       ${{ steps.filter.outputs.shippingservice }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            adservice:
-              - 'src/adservice/**'
-            cartservice:
-              - 'src/cartservice/**'
-            checkoutservice:
-              - 'src/checkoutservice/**'
-            currencyservice:
-              - 'src/currencyservice/**'
-            emailservice:
-              - 'src/emailservice/**'
-            frontend:
-              - 'src/frontend/**'
-            loadgenerator:
-              - 'src/loadgenerator/**'
-            paymentservice:
-              - 'src/paymentservice/**'
-            productcatalogservice:
-              - 'src/productcatalogservice/**'
-            recommendationservice:
-              - 'src/recommendationservice/**'
-            shippingservice:
-              - 'src/shippingservice/**'
-
-# =============================================================================
-# JAVA SERVICES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# adservice — Java / Gradle
-# -----------------------------------------------------------------------------
-  adservice:
-    name: "adservice (Java/Gradle)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.adservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/adservice
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # SonarQube needs full history
-
-      # ── Test ──────────────────────────────────────────────────────────────
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: temurin
-          cache: gradle
-
-      - name: Run Unit Tests
-        run: ./gradlew test --no-daemon
-
-      - name: Upload Test Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: adservice-test-report
-          path: src/adservice/build/reports/tests/
-
-      # ── SonarQube ─────────────────────────────────────────────────────────
-      - name: SonarQube Scan
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          ./gradlew sonarqube \
-            -Dsonar.projectKey=adservice \
-            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
-            -Dsonar.login=$SONAR_TOKEN \
-            --no-daemon
-
-      # ── Trivy Filesystem ──────────────────────────────────────────────────
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/adservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      # ── Docker Build & Push ───────────────────────────────────────────────
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push adservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/adservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/adservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/adservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # ── Trivy Image Scan ──────────────────────────────────────────────────
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/adservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-adservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-adservice.sarif
-          category: adservice-image
-
-# =============================================================================
-# Go SERVICES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# checkoutservice — Go
-# -----------------------------------------------------------------------------
-  checkoutservice:
-    name: "checkoutservice (Go)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.checkoutservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/checkoutservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-
-      - name: Run Tests
-        run: go test ./... -v -coverprofile=coverage.out
-
-      - name: Upload Coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: checkoutservice-coverage
-          path: src/checkoutservice/coverage.out
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/checkoutservice
-          args: >
-            -Dsonar.projectKey=checkoutservice
-            -Dsonar.go.coverage.reportPaths=coverage.out
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/checkoutservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push checkoutservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/checkoutservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-checkoutservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-checkoutservice.sarif
-          category: checkoutservice-image
-
-# -----------------------------------------------------------------------------
-# productcatalogservice — Go
-# -----------------------------------------------------------------------------
-  productcatalogservice:
-    name: "productcatalogservice (Go)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.productcatalogservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/productcatalogservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-
-      - name: Run Tests
-        run: go test ./... -v -coverprofile=coverage.out
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/productcatalogservice
-          args: >
-            -Dsonar.projectKey=productcatalogservice
-            -Dsonar.go.coverage.reportPaths=coverage.out
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/productcatalogservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push productcatalogservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/productcatalogservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-productcatalogservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-productcatalogservice.sarif
-          category: productcatalogservice-image
-
-# -----------------------------------------------------------------------------
-# shippingservice — Go
-# -----------------------------------------------------------------------------
-  shippingservice:
-    name: "shippingservice (Go)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.shippingservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/shippingservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-
-      - name: Run Tests
-        run: go test ./... -v -coverprofile=coverage.out
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/shippingservice
-          args: >
-            -Dsonar.projectKey=shippingservice
-            -Dsonar.go.coverage.reportPaths=coverage.out
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/shippingservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push shippingservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/shippingservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-shippingservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-shippingservice.sarif
-          category: shippingservice-image
-
-# -----------------------------------------------------------------------------
-# frontend — Go
-# -----------------------------------------------------------------------------
-  frontend:
-    name: "frontend (Go)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/frontend
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21'
-          cache: true
-
-      - name: Run Tests
-        run: go test ./... -v -coverprofile=coverage.out
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/frontend
-          args: >
-            -Dsonar.projectKey=frontend
-            -Dsonar.go.coverage.reportPaths=coverage.out
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/frontend
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push frontend
-        uses: docker/build-push-action@v5
-        with:
-          context: src/frontend
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/frontend:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-frontend.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-frontend.sarif
-          category: frontend-image
-
-# =============================================================================
-# PYTHON SERVICES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# emailservice — Python
-# -----------------------------------------------------------------------------
-  emailservice:
-    name: "emailservice (Python)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.emailservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/emailservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install Dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-cov flake8
-
-      - name: Lint (flake8)
-        run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
-
-      - name: Run Tests
-        run: pytest --cov=. --cov-report=xml:coverage.xml -v
-
-      - name: Upload Coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: emailservice-coverage
-          path: src/emailservice/coverage.xml
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/emailservice
-          args: >
-            -Dsonar.projectKey=emailservice
-            -Dsonar.python.coverage.reportPaths=coverage.xml
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/emailservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push emailservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/emailservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/emailservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/emailservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/emailservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-emailservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-emailservice.sarif
-          category: emailservice-image
-
-# -----------------------------------------------------------------------------
-# recommendationservice — Python
-# -----------------------------------------------------------------------------
-  recommendationservice:
-    name: "recommendationservice (Python)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.recommendationservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/recommendationservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install Dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pytest-cov flake8
-
-      - name: Lint (flake8)
-        run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
-
-      - name: Run Tests
-        run: pytest --cov=. --cov-report=xml:coverage.xml -v
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/recommendationservice
-          args: >
-            -Dsonar.projectKey=recommendationservice
-            -Dsonar.python.coverage.reportPaths=coverage.xml
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/recommendationservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push recommendationservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/recommendationservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-recommendationservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-recommendationservice.sarif
-          category: recommendationservice-image
-
-# -----------------------------------------------------------------------------
-# loadgenerator — Python / Locust
-# -----------------------------------------------------------------------------
-  loadgenerator:
-    name: "loadgenerator (Python/Locust)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.loadgenerator == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/loadgenerator
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: pip
-
-      - name: Install Dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install flake8
-
-      - name: Lint (flake8)
-        run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/loadgenerator
-          args: -Dsonar.projectKey=loadgenerator
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/loadgenerator
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push loadgenerator
-        uses: docker/build-push-action@v5
-        with:
-          context: src/loadgenerator
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-loadgenerator.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-loadgenerator.sarif
-          category: loadgenerator-image
-
-# =============================================================================
-# NODE.JS SERVICES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# currencyservice — Node.js
-# -----------------------------------------------------------------------------
-  currencyservice:
-    name: "currencyservice (Node.js)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.currencyservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/currencyservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: src/currencyservice/package-lock.json
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Lint (ESLint)
-        run: npx eslint . --ext .js --max-warnings 0 || true
-
-      - name: Run Tests
-        run: npm test -- --coverage --coverageDirectory=coverage
-
-      - name: Upload Coverage
-        uses: actions/upload-artifact@v4
-        with:
-          name: currencyservice-coverage
-          path: src/currencyservice/coverage/
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/currencyservice
-          args: >
-            -Dsonar.projectKey=currencyservice
-            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/currencyservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push currencyservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/currencyservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-currencyservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-currencyservice.sarif
-          category: currencyservice-image
-
-# -----------------------------------------------------------------------------
-# paymentservice — Node.js
-# -----------------------------------------------------------------------------
-  paymentservice:
-    name: "paymentservice (Node.js)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.paymentservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/paymentservice
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: src/paymentservice/package-lock.json
-
-      - name: Install Dependencies
-        run: npm ci
-
-      - name: Lint (ESLint)
-        run: npx eslint . --ext .js --max-warnings 0 || true
-
-      - name: Run Tests
-        run: npm test -- --coverage --coverageDirectory=coverage || true
-
-      - name: SonarQube Scan
-        uses: sonarsource/sonarqube-scan-action@master
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-        with:
-          projectBaseDir: src/paymentservice
-          args: >
-            -Dsonar.projectKey=paymentservice
-            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/paymentservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push paymentservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/paymentservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-paymentservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-paymentservice.sarif
-          category: paymentservice-image
-
-# =============================================================================
-# .NET SERVICES
-# =============================================================================
-
-# -----------------------------------------------------------------------------
-# cartservice — .NET / C#
-# -----------------------------------------------------------------------------
-  cartservice:
-    name: "cartservice (.NET/C#)"
-    needs: detect-changes
-    if: needs.detect-changes.outputs.cartservice == 'true' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: src/cartservice/src
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Restore Dependencies
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build --no-restore --configuration Release
-
-      - name: Run Tests
-        run: |
-          dotnet test --no-build --configuration Release \
-            --collect:"XPlat Code Coverage" \
-            --results-directory ./TestResults \
-            --logger "trx;LogFileName=test-results.trx"
-
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cartservice-test-results
-          path: src/cartservice/src/TestResults/
-
-      - name: Install SonarQube Scanner
-        run: dotnet tool install --global dotnet-sonarscanner
-
-      - name: SonarQube Scan
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        run: |
-          dotnet sonarscanner begin \
-            /k:"cartservice" \
-            /d:sonar.host.url="${{ env.SONAR_HOST_URL }}" \
-            /d:sonar.login="$SONAR_TOKEN" \
-            /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
-          dotnet build --no-restore --configuration Release
-          dotnet sonarscanner end /d:sonar.login="$SONAR_TOKEN"
-
-      - name: Trivy — Filesystem Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: src/cartservice
-          format: table
-          exit-code: '1'
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build & Push cartservice
-        uses: docker/build-push-action@v5
-        with:
-          context: src/cartservice
-          push: ${{ github.ref == 'refs/heads/main' }}
-          tags: |
-            ${{ env.DOCKER_HUB_USERNAME }}/cartservice:${{ env.IMAGE_TAG }}
-            ${{ env.DOCKER_HUB_USERNAME }}/cartservice:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Trivy — Image Scan
-        if: github.ref == 'refs/heads/main'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ${{ env.DOCKER_HUB_USERNAME }}/cartservice:${{ env.IMAGE_TAG }}
-          format: sarif
-          output: trivy-cartservice.sarif
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-
-      - name: Upload Trivy SARIF
-        if: github.ref == 'refs/heads/main'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-cartservice.sarif
-          category: cartservice-image
-
-# =============================================================================
-# SUMMARY JOB
-# =============================================================================
-
-  pipeline-summary:
-    name: "Pipeline Summary"
-    runs-on: ubuntu-latest
-    if: always()
-    needs:
-      - adservice
-      - cartservice
-      - checkoutservice
-      - currencyservice
-      - emailservice
-      - frontend
-      - loadgenerator
-      - paymentservice
-      - productcatalogservice
-      - recommendationservice
-      - shippingservice
-
-    steps:
-      - name: Check all service results
-        run: |
-          echo "======================================"
-          echo " Microservices Pipeline Summary"
-          echo "======================================"
-          echo "adservice            : ${{ needs.adservice.result }}"
-          echo "cartservice          : ${{ needs.cartservice.result }}"
-          echo "checkoutservice      : ${{ needs.checkoutservice.result }}"
-          echo "currencyservice      : ${{ needs.currencyservice.result }}"
-          echo "emailservice         : ${{ needs.emailservice.result }}"
-          echo "frontend             : ${{ needs.frontend.result }}"
-          echo "loadgenerator        : ${{ needs.loadgenerator.result }}"
-          echo "paymentservice       : ${{ needs.paymentservice.result }}"
-          echo "productcatalogservice: ${{ needs.productcatalogservice.result }}"
-          echo "recommendationservice: ${{ needs.recommendationservice.result }}"
-          echo "shippingservice      : ${{ needs.shippingservice.result }}"
-          echo "======================================"
-          for result in \
-            "${{ needs.adservice.result }}" \
-            "${{ needs.cartservice.result }}" \
-            "${{ needs.checkoutservice.result }}" \
-            "${{ needs.currencyservice.result }}" \
-            "${{ needs.emailservice.result }}" \
-            "${{ needs.frontend.result }}" \
-            "${{ needs.loadgenerator.result }}" \
-            "${{ needs.paymentservice.result }}" \
-            "${{ needs.productcatalogservice.result }}" \
-            "${{ needs.recommendationservice.result }}" \
-            "${{ needs.shippingservice.result }}"; do
-            if [[ "$result" == "failure" ]]; then
-              echo "One or more services FAILED."
-              exit 1
-            fi
-          done
-          echo "All triggered services passed!"
+# # =============================================================================
+# # GitHub Actions CI/CD Pipeline — microservices-demo
+# # Pipeline: Test → SonarQube → Trivy → Docker Build & Push (Docker Hub)
+# # Services: adservice | cartservice | checkoutservice | currencyservice |
+# #           emailservice | frontend | loadgenerator | paymentservice |
+# #           productcatalogservice | recommendationservice | shippingservice
+# # Author  : Lokesh (lokeshzenbook)
+# # =============================================================================
+
+# name: Microservices CI/CD Pipeline
+
+# on:
+#   push:
+#     branches: [main, develop]
+#   pull_request:
+#     branches: [main]
+#   workflow_dispatch:
+
+# # ─────────────────────────────────────────────
+# # Global defaults
+# # ─────────────────────────────────────────────
+# env:
+#   DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}   # lokeshzenbook
+#   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}              # https://sonarcloud.io
+#   IMAGE_TAG: ${{ github.sha }}
+
+# # ─────────────────────────────────────────────────────────────────────────────
+# # JOB 1 — Detect which services changed (path filter)
+# # ─────────────────────────────────────────────────────────────────────────────
+# jobs:
+#   detect-changes:
+#     name: "Detect Changed Services"
+#     runs-on: ubuntu-latest
+#     outputs:
+#       adservice:             ${{ steps.filter.outputs.adservice }}
+#       cartservice:           ${{ steps.filter.outputs.cartservice }}
+#       checkoutservice:       ${{ steps.filter.outputs.checkoutservice }}
+#       currencyservice:       ${{ steps.filter.outputs.currencyservice }}
+#       emailservice:          ${{ steps.filter.outputs.emailservice }}
+#       frontend:              ${{ steps.filter.outputs.frontend }}
+#       loadgenerator:         ${{ steps.filter.outputs.loadgenerator }}
+#       paymentservice:        ${{ steps.filter.outputs.paymentservice }}
+#       productcatalogservice: ${{ steps.filter.outputs.productcatalogservice }}
+#       recommendationservice: ${{ steps.filter.outputs.recommendationservice }}
+#       shippingservice:       ${{ steps.filter.outputs.shippingservice }}
+#     steps:
+#       - uses: actions/checkout@v4
+
+#       - uses: dorny/paths-filter@v3
+#         id: filter
+#         with:
+#           filters: |
+#             adservice:
+#               - 'src/adservice/**'
+#             cartservice:
+#               - 'src/cartservice/**'
+#             checkoutservice:
+#               - 'src/checkoutservice/**'
+#             currencyservice:
+#               - 'src/currencyservice/**'
+#             emailservice:
+#               - 'src/emailservice/**'
+#             frontend:
+#               - 'src/frontend/**'
+#             loadgenerator:
+#               - 'src/loadgenerator/**'
+#             paymentservice:
+#               - 'src/paymentservice/**'
+#             productcatalogservice:
+#               - 'src/productcatalogservice/**'
+#             recommendationservice:
+#               - 'src/recommendationservice/**'
+#             shippingservice:
+#               - 'src/shippingservice/**'
+
+# # =============================================================================
+# # JAVA SERVICES
+# # =============================================================================
+
+# # -----------------------------------------------------------------------------
+# # adservice — Java / Gradle
+# # -----------------------------------------------------------------------------
+#   adservice:
+#     name: "adservice (Java/Gradle)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.adservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/adservice
+
+#     steps:
+#       - name: Checkout
+#         uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0   # SonarQube needs full history
+
+#       # ── Test ──────────────────────────────────────────────────────────────
+#       - name: Set up JDK 17
+#         uses: actions/setup-java@v4
+#         with:
+#           java-version: '17'
+#           distribution: temurin
+#           cache: gradle
+
+#       - name: Run Unit Tests
+#         run: ./gradlew test --no-daemon
+
+#       - name: Upload Test Report
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: adservice-test-report
+#           path: src/adservice/build/reports/tests/
+
+#       # ── SonarQube ─────────────────────────────────────────────────────────
+#       - name: SonarQube Scan
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#         run: |
+#           ./gradlew sonarqube \
+#             -Dsonar.projectKey=adservice \
+#             -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+#             -Dsonar.login=$SONAR_TOKEN \
+#             --no-daemon
+
+#       # ── Trivy Filesystem ──────────────────────────────────────────────────
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/adservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       # ── Docker Build & Push ───────────────────────────────────────────────
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push adservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/adservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/adservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/adservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       # ── Trivy Image Scan ──────────────────────────────────────────────────
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/adservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-adservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-adservice.sarif
+#           category: adservice-image
+
+# # =============================================================================
+# # Go SERVICES
+# # =============================================================================
+
+# # -----------------------------------------------------------------------------
+# # checkoutservice — Go
+# # -----------------------------------------------------------------------------
+#   checkoutservice:
+#     name: "checkoutservice (Go)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.checkoutservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/checkoutservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Go
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+#           cache: true
+
+#       - name: Run Tests
+#         run: go test ./... -v -coverprofile=coverage.out
+
+#       - name: Upload Coverage
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: checkoutservice-coverage
+#           path: src/checkoutservice/coverage.out
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/checkoutservice
+#           args: >
+#             -Dsonar.projectKey=checkoutservice
+#             -Dsonar.go.coverage.reportPaths=coverage.out
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/checkoutservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push checkoutservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/checkoutservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/checkoutservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-checkoutservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-checkoutservice.sarif
+#           category: checkoutservice-image
+
+# # -----------------------------------------------------------------------------
+# # productcatalogservice — Go
+# # -----------------------------------------------------------------------------
+#   productcatalogservice:
+#     name: "productcatalogservice (Go)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.productcatalogservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/productcatalogservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Go
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+#           cache: true
+
+#       - name: Run Tests
+#         run: go test ./... -v -coverprofile=coverage.out
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/productcatalogservice
+#           args: >
+#             -Dsonar.projectKey=productcatalogservice
+#             -Dsonar.go.coverage.reportPaths=coverage.out
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/productcatalogservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push productcatalogservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/productcatalogservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/productcatalogservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-productcatalogservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-productcatalogservice.sarif
+#           category: productcatalogservice-image
+
+# # -----------------------------------------------------------------------------
+# # shippingservice — Go
+# # -----------------------------------------------------------------------------
+#   shippingservice:
+#     name: "shippingservice (Go)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.shippingservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/shippingservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Go
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+#           cache: true
+
+#       - name: Run Tests
+#         run: go test ./... -v -coverprofile=coverage.out
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/shippingservice
+#           args: >
+#             -Dsonar.projectKey=shippingservice
+#             -Dsonar.go.coverage.reportPaths=coverage.out
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/shippingservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push shippingservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/shippingservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/shippingservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-shippingservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-shippingservice.sarif
+#           category: shippingservice-image
+
+# # -----------------------------------------------------------------------------
+# # frontend — Go
+# # -----------------------------------------------------------------------------
+#   frontend:
+#     name: "frontend (Go)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.frontend == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/frontend
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Go
+#         uses: actions/setup-go@v5
+#         with:
+#           go-version: '1.21'
+#           cache: true
+
+#       - name: Run Tests
+#         run: go test ./... -v -coverprofile=coverage.out
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/frontend
+#           args: >
+#             -Dsonar.projectKey=frontend
+#             -Dsonar.go.coverage.reportPaths=coverage.out
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/frontend
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push frontend
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/frontend
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/frontend:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-frontend.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-frontend.sarif
+#           category: frontend-image
+
+# # =============================================================================
+# # PYTHON SERVICES
+# # =============================================================================
+
+# # -----------------------------------------------------------------------------
+# # emailservice — Python
+# # -----------------------------------------------------------------------------
+#   emailservice:
+#     name: "emailservice (Python)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.emailservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/emailservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+#           cache: pip
+
+#       - name: Install Dependencies
+#         run: |
+#           pip install --upgrade pip
+#           pip install -r requirements.txt
+#           pip install pytest pytest-cov flake8
+
+#       - name: Lint (flake8)
+#         run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
+
+#       - name: Run Tests
+#         run: pytest --cov=. --cov-report=xml:coverage.xml -v
+
+#       - name: Upload Coverage
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: emailservice-coverage
+#           path: src/emailservice/coverage.xml
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/emailservice
+#           args: >
+#             -Dsonar.projectKey=emailservice
+#             -Dsonar.python.coverage.reportPaths=coverage.xml
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/emailservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push emailservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/emailservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/emailservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/emailservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/emailservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-emailservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-emailservice.sarif
+#           category: emailservice-image
+
+# # -----------------------------------------------------------------------------
+# # recommendationservice — Python
+# # -----------------------------------------------------------------------------
+#   recommendationservice:
+#     name: "recommendationservice (Python)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.recommendationservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/recommendationservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+#           cache: pip
+
+#       - name: Install Dependencies
+#         run: |
+#           pip install --upgrade pip
+#           pip install -r requirements.txt
+#           pip install pytest pytest-cov flake8
+
+#       - name: Lint (flake8)
+#         run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
+
+#       - name: Run Tests
+#         run: pytest --cov=. --cov-report=xml:coverage.xml -v
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/recommendationservice
+#           args: >
+#             -Dsonar.projectKey=recommendationservice
+#             -Dsonar.python.coverage.reportPaths=coverage.xml
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/recommendationservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push recommendationservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/recommendationservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/recommendationservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-recommendationservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-recommendationservice.sarif
+#           category: recommendationservice-image
+
+# # -----------------------------------------------------------------------------
+# # loadgenerator — Python / Locust
+# # -----------------------------------------------------------------------------
+#   loadgenerator:
+#     name: "loadgenerator (Python/Locust)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.loadgenerator == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/loadgenerator
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: '3.11'
+#           cache: pip
+
+#       - name: Install Dependencies
+#         run: |
+#           pip install --upgrade pip
+#           pip install -r requirements.txt
+#           pip install flake8
+
+#       - name: Lint (flake8)
+#         run: flake8 . --max-line-length=120 --exclude=.git,__pycache__
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/loadgenerator
+#           args: -Dsonar.projectKey=loadgenerator
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/loadgenerator
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push loadgenerator
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/loadgenerator
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/loadgenerator:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-loadgenerator.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-loadgenerator.sarif
+#           category: loadgenerator-image
+
+# # =============================================================================
+# # NODE.JS SERVICES
+# # =============================================================================
+
+# # -----------------------------------------------------------------------------
+# # currencyservice — Node.js
+# # -----------------------------------------------------------------------------
+#   currencyservice:
+#     name: "currencyservice (Node.js)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.currencyservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/currencyservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+#           cache: npm
+#           cache-dependency-path: src/currencyservice/package-lock.json
+
+#       - name: Install Dependencies
+#         run: npm ci
+
+#       - name: Lint (ESLint)
+#         run: npx eslint . --ext .js --max-warnings 0 || true
+
+#       - name: Run Tests
+#         run: npm test -- --coverage --coverageDirectory=coverage
+
+#       - name: Upload Coverage
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: currencyservice-coverage
+#           path: src/currencyservice/coverage/
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/currencyservice
+#           args: >
+#             -Dsonar.projectKey=currencyservice
+#             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/currencyservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push currencyservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/currencyservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/currencyservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-currencyservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-currencyservice.sarif
+#           category: currencyservice-image
+
+# # -----------------------------------------------------------------------------
+# # paymentservice — Node.js
+# # -----------------------------------------------------------------------------
+#   paymentservice:
+#     name: "paymentservice (Node.js)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.paymentservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/paymentservice
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up Node.js
+#         uses: actions/setup-node@v4
+#         with:
+#           node-version: '20'
+#           cache: npm
+#           cache-dependency-path: src/paymentservice/package-lock.json
+
+#       - name: Install Dependencies
+#         run: npm ci
+
+#       - name: Lint (ESLint)
+#         run: npx eslint . --ext .js --max-warnings 0 || true
+
+#       - name: Run Tests
+#         run: npm test -- --coverage --coverageDirectory=coverage || true
+
+#       - name: SonarQube Scan
+#         uses: sonarsource/sonarqube-scan-action@master
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+#         with:
+#           projectBaseDir: src/paymentservice
+#           args: >
+#             -Dsonar.projectKey=paymentservice
+#             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/paymentservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push paymentservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/paymentservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/paymentservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-paymentservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-paymentservice.sarif
+#           category: paymentservice-image
+
+# # =============================================================================
+# # .NET SERVICES
+# # =============================================================================
+
+# # -----------------------------------------------------------------------------
+# # cartservice — .NET / C#
+# # -----------------------------------------------------------------------------
+#   cartservice:
+#     name: "cartservice (.NET/C#)"
+#     needs: detect-changes
+#     if: needs.detect-changes.outputs.cartservice == 'true' || github.event_name == 'workflow_dispatch'
+#     runs-on: ubuntu-latest
+#     defaults:
+#       run:
+#         working-directory: src/cartservice/src
+
+#     steps:
+#       - uses: actions/checkout@v4
+#         with:
+#           fetch-depth: 0
+
+#       - name: Set up .NET
+#         uses: actions/setup-dotnet@v4
+#         with:
+#           dotnet-version: '8.0.x'
+
+#       - name: Restore Dependencies
+#         run: dotnet restore
+
+#       - name: Build
+#         run: dotnet build --no-restore --configuration Release
+
+#       - name: Run Tests
+#         run: |
+#           dotnet test --no-build --configuration Release \
+#             --collect:"XPlat Code Coverage" \
+#             --results-directory ./TestResults \
+#             --logger "trx;LogFileName=test-results.trx"
+
+#       - name: Upload Test Results
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: cartservice-test-results
+#           path: src/cartservice/src/TestResults/
+
+#       - name: Install SonarQube Scanner
+#         run: dotnet tool install --global dotnet-sonarscanner
+
+#       - name: SonarQube Scan
+#         env:
+#           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#         run: |
+#           dotnet sonarscanner begin \
+#             /k:"cartservice" \
+#             /d:sonar.host.url="${{ env.SONAR_HOST_URL }}" \
+#             /d:sonar.login="$SONAR_TOKEN" \
+#             /d:sonar.cs.opencover.reportsPaths="**/coverage.opencover.xml"
+#           dotnet build --no-restore --configuration Release
+#           dotnet sonarscanner end /d:sonar.login="$SONAR_TOKEN"
+
+#       - name: Trivy — Filesystem Scan
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           scan-type: fs
+#           scan-ref: src/cartservice
+#           format: table
+#           exit-code: '1'
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Set up Docker Buildx
+#         uses: docker/setup-buildx-action@v3
+
+#       - name: Login to Docker Hub
+#         uses: docker/login-action@v3
+#         with:
+#           username: ${{ secrets.DOCKER_HUB_USERNAME }}
+#           password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+#       - name: Build & Push cartservice
+#         uses: docker/build-push-action@v5
+#         with:
+#           context: src/cartservice
+#           push: ${{ github.ref == 'refs/heads/main' }}
+#           tags: |
+#             ${{ env.DOCKER_HUB_USERNAME }}/cartservice:${{ env.IMAGE_TAG }}
+#             ${{ env.DOCKER_HUB_USERNAME }}/cartservice:latest
+#           cache-from: type=gha
+#           cache-to: type=gha,mode=max
+
+#       - name: Trivy — Image Scan
+#         if: github.ref == 'refs/heads/main'
+#         uses: aquasecurity/trivy-action@master
+#         with:
+#           image-ref: ${{ env.DOCKER_HUB_USERNAME }}/cartservice:${{ env.IMAGE_TAG }}
+#           format: sarif
+#           output: trivy-cartservice.sarif
+#           severity: CRITICAL,HIGH
+#           ignore-unfixed: true
+
+#       - name: Upload Trivy SARIF
+#         if: github.ref == 'refs/heads/main'
+#         uses: github/codeql-action/upload-sarif@v3
+#         with:
+#           sarif_file: trivy-cartservice.sarif
+#           category: cartservice-image
+
+# # =============================================================================
+# # SUMMARY JOB
+# # =============================================================================
+
+#   pipeline-summary:
+#     name: "Pipeline Summary"
+#     runs-on: ubuntu-latest
+#     if: always()
+#     needs:
+#       - adservice
+#       - cartservice
+#       - checkoutservice
+#       - currencyservice
+#       - emailservice
+#       - frontend
+#       - loadgenerator
+#       - paymentservice
+#       - productcatalogservice
+#       - recommendationservice
+#       - shippingservice
+
+#     steps:
+#       - name: Check all service results
+#         run: |
+#           echo "======================================"
+#           echo " Microservices Pipeline Summary"
+#           echo "======================================"
+#           echo "adservice            : ${{ needs.adservice.result }}"
+#           echo "cartservice          : ${{ needs.cartservice.result }}"
+#           echo "checkoutservice      : ${{ needs.checkoutservice.result }}"
+#           echo "currencyservice      : ${{ needs.currencyservice.result }}"
+#           echo "emailservice         : ${{ needs.emailservice.result }}"
+#           echo "frontend             : ${{ needs.frontend.result }}"
+#           echo "loadgenerator        : ${{ needs.loadgenerator.result }}"
+#           echo "paymentservice       : ${{ needs.paymentservice.result }}"
+#           echo "productcatalogservice: ${{ needs.productcatalogservice.result }}"
+#           echo "recommendationservice: ${{ needs.recommendationservice.result }}"
+#           echo "shippingservice      : ${{ needs.shippingservice.result }}"
+#           echo "======================================"
+#           for result in \
+#             "${{ needs.adservice.result }}" \
+#             "${{ needs.cartservice.result }}" \
+#             "${{ needs.checkoutservice.result }}" \
+#             "${{ needs.currencyservice.result }}" \
+#             "${{ needs.emailservice.result }}" \
+#             "${{ needs.frontend.result }}" \
+#             "${{ needs.loadgenerator.result }}" \
+#             "${{ needs.paymentservice.result }}" \
+#             "${{ needs.productcatalogservice.result }}" \
+#             "${{ needs.recommendationservice.result }}" \
+#             "${{ needs.shippingservice.result }}"; do
+#             if [[ "$result" == "failure" ]]; then
+#               echo "One or more services FAILED."
+#               exit 1
+#             fi
+#           done
+#           echo "All triggered services passed!"
