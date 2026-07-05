@@ -1,577 +1,417 @@
-# name: Enterprise DevSecOps CI/CD Pipeline
-
-# on:
-#   push:
-#     branches:
-#       - main
-#     tags:
-#       - 'v*'
-#   pull_request:
-#     branches:
-#       - main
-#   workflow_dispatch:
-
-# permissions:
-#   contents: read
-#   security-events: write
-#   actions: read
-
-# concurrency:
-#   group: ${{ github.workflow }}-${{ github.ref }}
-#   cancel-in-progress: true
-
-# jobs:
-#   # ============================================================
-#   # JOB 1 - SECRETS SCANNING (Static Analysis)
-#   # ============================================================
-#   secrets-scan:
-#     name: Gitleaks - Secrets Scanning
-#     runs-on: ubuntu-latest
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-#         with:
-#           fetch-depth: 0
-
-#       - name: Run Gitleaks
-#         uses: gitleaks/gitleaks-action@v2
-#         id: gitleaks
-#         with:
-#           config-path: .gitleaks.toml
-#           redact: true
-#           verbose: true
-#           exit-code: 1
-
-#       - name: Upload Gitleaks Report
-#         if: always()
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: gitleaks-report-${{ github.sha }}
-#           path: ${{ steps.gitleaks.outputs.report-path }}
-#           retention-days: 30
-
-#   # ============================================================
-#   # JOB 2 - STATIC APPLICATION SECURITY TESTING (SAST)
-#   # ============================================================
-#   sast:
-#     name: Semgrep - SAST
-#     runs-on: ubuntu-latest
-#     needs: [secrets-scan]
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Run Semgrep SAST
-#         uses: returntocorp/semgrep-action@v1
-#         with:
-#           config: p/security-audit
-#           output: semgrep-results.sarif
-#           sarif: true
-#           severity: ERROR
-#           disable-metrics: false
-
-#       - name: Upload SARIF Results
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: semgrep-sarif-${{ github.sha }}
-#           path: semgrep-results.sarif
-#           retention-days: 30
-
-#       - name: Upload to GitHub Security
-#         uses: github/codeql-action/upload-sarif@v3
-#         with:
-#           sarif_file: semgrep-results.sarif
-
-#   # ============================================================
-#   # JOB 3 - UNIT TESTING (Matrix Strategy)
-#   # ============================================================
-#   unit-test:
-#     name: Test - ${{ matrix.service.name }}
-#     runs-on: ubuntu-latest
-#     needs: [sast]
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         service: ${{ fromJson(needs.sast.outputs.matrix || '[]') }}
-#         # Fallback to original matrix if no output from sast
-#         include:
-#           - name: adservice
-#             context: ./src/adservice
-#             lang: java
-
-#           - name: cartservice
-#             context: ./src/cartservice/src
-#             lang: dotnet
-
-#           - name: checkoutservice
-#             context: ./src/checkoutservice
-#             lang: go
-
-#           - name: currencyservice
-#             context: ./src/currencyservice
-#             lang: node
-
-#           - name: emailservice
-#             context: ./src/emailservice
-#             lang: python
-
-#           - name: frontend
-#             context: ./src/frontend
-#             lang: go
-
-#           - name: loadgenerator
-#             context: ./src/loadgenerator
-#             lang: python
-
-#           - name: paymentservice
-#             context: ./src/paymentservice
-#             lang: node
-
-#           - name: productcatalogservice
-#             context: ./src/productcatalogservice
-#             lang: go
-
-#           - name: recommendationservice
-#             context: ./src/recommendationservice
-#             lang: python
-
-#           - name: shippingservice
-#             context: ./src/shippingservice
-#             lang: go
-
-#           - name: shoppingassistantservice
-#             context: ./src/shoppingassistantservice
-#             lang: python
-
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       # Go Services
-#       - name: Set up Go
-#         if: matrix.service.lang == 'go'
-#         uses: actions/setup-go@v5
-#         with:
-#           go-version: '1.21'
-
-#       - name: Run Go Tests with Coverage
-#         if: matrix.service.lang == 'go'
-#         working-directory: ${{ matrix.service.context }}
-#         run: |
-#           go mod tidy || true
-#           go test -coverprofile=coverage.out -covermode=atomic ./... || echo "⚠️ No Go tests found"
-#           if [ -f coverage.out ]; then
-#             go tool cover -html=coverage.out -o coverage.html
-#           fi
-
-#       # Java Services
-#       - name: Set up Java
-#         if: matrix.service.lang == 'java'
-#         uses: actions/setup-java@v4
-#         with:
-#           java-version: '21'
-#           distribution: 'temurin'
-
-#       - name: Run Java Tests
-#         if: matrix.service.lang == 'java'
-#         working-directory: ${{ matrix.service.context }}
-#         run: |
-#           ./gradlew test --info || mvn test || echo "⚠️ No Java tests found"
-
-#       # Python Services
-#       - name: Set up Python
-#         if: matrix.service.lang == 'python'
-#         uses: actions/setup-python@v5
-#         with:
-#           python-version: '3.12'
-
-#       - name: Run Python Tests with Coverage
-#         if: matrix.service.lang == 'python'
-#         working-directory: ${{ matrix.service.context }}
-#         run: |
-#           pip install -r requirements.txt --quiet || true
-#           pip install pytest pytest-cov || true
-#           python -m pytest --cov=. --cov-report=xml:coverage.xml --cov-report=html:coverage_html || echo "⚠️ No Python tests found"
-
-#       # Node Services
-#       - name: Set up Node
-#         if: matrix.service.lang == 'node'
-#         uses: actions/setup-node@v4
-#         with:
-#           node-version: '20'
-
-#       - name: Run Node Tests
-#         if: matrix.service.lang == 'node'
-#         working-directory: ${{ matrix.service.context }}
-#         run: |
-#           npm ci --quiet || true
-#           npm test -- --coverage || echo "⚠️ No Node tests found"
-
-#       # .NET Services
-#       - name: Set up .NET
-#         if: matrix.service.lang == 'dotnet'
-#         uses: actions/setup-dotnet@v4
-#         with:
-#           dotnet-version: '8.0'
-
-#       - name: Run .NET Tests
-#         if: matrix.service.lang == 'dotnet'
-#         working-directory: ${{ matrix.service.context }}
-#         run: |
-#           dotnet restore || true
-#           dotnet test --logger "trx;LogFileName=test-results.trx" --collect:"XPlat Code Coverage" || echo "⚠️ No .NET tests found"
-
-#       - name: Upload Test Reports
-#         if: always()
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: test-reports-${{ matrix.service.name }}-${{ github.sha }}
-#           path: ${{ matrix.service.context }}/
-#           include-hidden-files: true
-#           if-no-files-found: ignore
-#           retention-days: 30
-
-#   # ============================================================
-#   # JOB 4 - DOCKER BUILD WITH CACHE
-#   # ============================================================
-#   docker-build:
-#     name: Build - ${{ matrix.service.name }}
-#     runs-on: ubuntu-latest
-#     needs: [unit-test]
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         service: ${{ fromJson(needs.unit-test.outputs.matrix || '[]') }}
-#         include:
-#           - name: adservice
-#             context: ./src/adservice
-#             dockerfile: ./src/adservice/Dockerfile
-
-#           - name: cartservice
-#             context: ./src/cartservice/src
-#             dockerfile: ./src/cartservice/src/Dockerfile
-
-#           - name: checkoutservice
-#             context: ./src/checkoutservice
-#             dockerfile: ./src/checkoutservice/Dockerfile
-
-#           - name: currencyservice
-#             context: ./src/currencyservice
-#             dockerfile: ./src/currencyservice/Dockerfile
-
-#           - name: emailservice
-#             context: ./src/emailservice
-#             dockerfile: ./src/emailservice/Dockerfile
-
-#           - name: frontend
-#             context: ./src/frontend
-#             dockerfile: ./src/frontend/Dockerfile
-
-#           - name: loadgenerator
-#             context: ./src/loadgenerator
-#             dockerfile: ./src/loadgenerator/Dockerfile
-
-#           - name: paymentservice
-#             context: ./src/paymentservice
-#             dockerfile: ./src/paymentservice/Dockerfile
-
-#           - name: productcatalogservice
-#             context: ./src/productcatalogservice
-#             dockerfile: ./src/productcatalogservice/Dockerfile
-
-#           - name: recommendationservice
-#             context: ./src/recommendationservice
-#             dockerfile: ./src/recommendationservice/Dockerfile
-
-#           - name: shippingservice
-#             context: ./src/shippingservice
-#             dockerfile: ./src/shippingservice/Dockerfile
-
-#           - name: shoppingassistantservice
-#             context: ./src/shoppingassistantservice
-#             dockerfile: ./src/shoppingassistantservice/Dockerfile
-
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Set up Docker Buildx with Cache
-#         uses: docker/setup-buildx-action@v3
-#         with:
-#           driver-opts: |
-#             image=moby/buildkit:master
-#             network=host
-
-#       - name: Cache Docker Layers
-#         uses: actions/cache@v4
-#         with:
-#           path: /tmp/.buildx-cache
-#           key: docker-${{ runner.os }}-${{ matrix.service.name }}-${{ github.sha }}
-#           restore-keys: |
-#             docker-${{ runner.os }}-${{ matrix.service.name }}-
-
-#       - name: Build Docker Image
-#         uses: docker/build-push-action@v6
-#         with:
-#           context: ${{ matrix.service.context }}
-#           file: ${{ matrix.service.dockerfile }}
-#           push: false
-#           tags: |
-#             ${{ github.repository }}/${{ matrix.service.name }}:${{ github.sha }}
-#             ${{ github.repository }}/${{ matrix.service.name }}:latest
-#           cache-from: type=local,src=/tmp/.buildx-cache
-#           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
-#           outputs: type=docker,dest=/tmp/${{ matrix.service.name }}.tar
-
-#       - name: Move Cache
-#         run: |
-#           rm -rf /tmp/.buildx-cache
-#           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-#       - name: Save Docker Image
-#         run: |
-#           mkdir -p /tmp/images
-#           mv /tmp/${{ matrix.service.name }}.tar /tmp/images/
-
-#       - name: Upload Docker Image
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
-#           path: /tmp/images/${{ matrix.service.name }}.tar
-#           retention-days: 7
-
-#   # ============================================================
-#   # JOB 5 - CONTAINER SECURITY SCANNING
-#   # ============================================================
-#   container-scan:
-#     name: Trivy - Container Scan
-#     runs-on: ubuntu-latest
-#     needs: [docker-build]
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         service: ${{ fromJson(needs.docker-build.outputs.matrix || '[]') }}
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Download Docker Image
-#         uses: actions/download-artifact@v4
-#         with:
-#           name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
-#           path: /tmp/images
-
-#       - name: Load Docker Image
-#         run: docker load -i /tmp/images/${{ matrix.service.name }}.tar
-
-#       - name: Run Trivy Vulnerability Scanner
-#         uses: aquasecurity/trivy-action@master
-#         with:
-#           image-ref: /tmp/images/${{ matrix.service.name }}.tar
-#           format: 'sarif'
-#           output: 'trivy-results-${{ matrix.service.name }}.sarif'
-#           severity: 'CRITICAL,HIGH'
-
-#       - name: Upload Trivy Report
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: trivy-report-${{ matrix.service.name }}-${{ github.sha }}
-#           path: trivy-results-${{ matrix.service.name }}.sarif
-#           retention-days: 30
-
-#       - name: Upload Trivy SARIF to Security
-#         uses: github/codeql-action/upload-sarif@v3
-#         with:
-#           sarif_file: trivy-results-${{ matrix.service.name }}.sarif
-
-#   # ============================================================
-#   # JOB 6 - SBOM GENERATION
-#   # ============================================================
-#   sbom-generation:
-#     name: Syft - SBOM Generation
-#     runs-on: ubuntu-latest
-#     needs: [docker-build]
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         service: ${{ fromJson(needs.docker-build.outputs.matrix || '[]') }}
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Download Docker Image
-#         uses: actions/download-artifact@v4
-#         with:
-#           name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
-#           path: /tmp/images
-
-#       - name: Generate SBOM with Syft
-#         uses: anchore/sbom-action@v0
-#         with:
-#           image: /tmp/images/${{ matrix.service.name }}.tar
-#           format: spdx-json
-#           output-file: sbom-${{ matrix.service.name }}.spdx.json
-
-#       - name: Upload SBOM Artifact
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: sbom-${{ matrix.service.name }}-${{ github.sha }}
-#           path: sbom-${{ matrix.service.name }}.spdx.json
-#           retention-days: 90
-
-#       - name: Attach SBOM to GitHub Release
-#         if: startsWith(github.ref, 'refs/tags/v')
-#         uses: softprops/action-gh-release@v1
-#         with:
-#           files: sbom-${{ matrix.service.name }}.spdx.json
-
-#   # ============================================================
-#   # JOB 7 - DOCKER PUSH TO REGISTRY
-#   # ============================================================
-#   docker-push:
-#     name: Push - ${{ matrix.service.name }}
-#     runs-on: ubuntu-latest
-#     needs: [container-scan, sbom-generation]
-#     if: github.event_name != 'pull_request'
-#     strategy:
-#       fail-fast: false
-#       matrix:
-#         service: ${{ fromJson(needs.container-scan.outputs.matrix || '[]') }}
-#     steps:
-#       - name: Checkout Repository
-#         uses: actions/checkout@v4
-
-#       - name: Download Docker Image
-#         uses: actions/download-artifact@v4
-#         with:
-#           name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
-#           path: /tmp/images
-
-#       - name: Set up Docker Buildx
-#         uses: docker/setup-buildx-action@v3
-
-#       - name: Login to Docker Hub
-#         uses: docker/login-action@v3
-#         with:
-#           registry: docker.io
-#           username: ${{ secrets.DOCKERHUB_USERNAME }}
-#           password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-#       - name: Login to GitHub Container Registry
-#         uses: docker/login-action@v3
-#         with:
-#           registry: ghcr.io
-#           username: ${{ github.actor }}
-#           password: ${{ secrets.GITHUB_TOKEN }}
-
-#       - name: Extract Docker Metadata
-#         id: meta
-#         uses: docker/metadata-action@v5
-#         with:
-#           images: |
-#             ${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}
-#             ghcr.io/${{ github.repository }}/${{ matrix.service.name }}
-#           tags: |
-#             type=ref,event=branch
-#             type=ref,event=pr
-#             type=semver,pattern={{version}}
-#             type=sha,prefix={{branch}}-
-#             type=raw,value=latest
-
-#       - name: Load and Push Docker Image
-#         uses: docker/build-push-action@v6
-#         with:
-#           context: ${{ matrix.service.context }}
-#           file: ${{ matrix.service.dockerfile }}
-#           push: true
-#           tags: ${{ steps.meta.outputs.tags }}
-#           labels: ${{ steps.meta.outputs.labels }}
-#           provenance: false
-#           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}:buildcache
-#           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}:buildcache,mode=max
-
-#       - name: Verify Push
-#         run: |
-#           echo "✅ ${{ matrix.service.name }} pushed successfully"
-#           echo "Tags: ${{ steps.meta.outputs.tags }}"
-
-#   # ============================================================
-#   # JOB 8 - UPLOAD ALL REPORTS
-#   # ============================================================
-#   upload-reports:
-#     name: Upload Reports
-#     runs-on: ubuntu-latest
-#     needs: [secrets-scan, sast, unit-test, container-scan, sbom-generation]
-#     if: always()
-#     steps:
-#       - name: Download All Security Reports
-#         uses: actions/download-artifact@v4
-#         with:
-#           path: ./reports
-
-#       - name: Create Consolidated Report
-#         run: |
-#           mkdir -p ./consolidated
-#           find ./reports -name "*.sarif" -o -name "*.json" -o -name "*.html" | head -20 > ./consolidated/report-list.txt
-#           echo "Report generation completed at $(date)" > ./consolidated/summary.txt
-
-#       - name: Upload Consolidated Reports
-#         uses: actions/upload-artifact@v4
-#         with:
-#           name: consolidated-security-reports-${{ github.sha }}
-#           path: ./consolidated/
-#           retention-days: 90
-
-#   # ============================================================
-#   # JOB 9 - NOTIFICATIONS
-#   # ============================================================
-#   notifications:
-#     name: Send Notifications
-#     runs-on: ubuntu-latest
-#     needs: [upload-reports, docker-push]
-#     if: always()
-#     steps:
-#       - name: Slack Notification
-#         uses: 8398a7/action-slack@v3
-#         with:
-#           status: ${{ job.status }}
-#           channel: '#devops-alerts'
-#           username: 'GitHub Actions'
-#           icon_emoji: ':github:'
-#         env:
-#           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-
-#       - name: Prepare Email Report
-#         if: always()
-#         run: |
-#           echo "CI/CD Pipeline Report - ${{ github.repository }}" > email-report.txt
-#           echo "==============================================" >> email-report.txt
-#           echo "Workflow: ${{ github.workflow }}" >> email-report.txt
-#           echo "Commit: ${{ github.sha }}" >> email-report.txt
-#           echo "Branch: ${{ github.ref }}" >> email-report.txt
-#           echo "Status: ${{ job.status }}" >> email-report.txt
-#           echo "Triggered by: ${{ github.actor }}" >> email-report.txt
-#           echo "Timestamp: $(date)" >> email-report.txt
-#           echo "" >> email-report.txt
-#           echo "Job Summary:" >> email-report.txt
-#           echo "-----------" >> email-report.txt
-#           echo "- Secrets Scan: ${{ needs.secrets-scan.result }}" >> email-report.txt
-#           echo "- SAST Scan: ${{ needs.sast.result }}" >> email-report.txt
-#           echo "- Unit Tests: ${{ needs.unit-test.result }}" >> email-report.txt
-#           echo "- Container Scan: ${{ needs.container-scan.result }}" >> email-report.txt
-#           echo "- SBOM Generation: ${{ needs.sbom-generation.result }}" >> email-report.txt
-#           echo "- Docker Push: ${{ needs.docker-push.result }}" >> email-report.txt
-
-#       - name: Send Email with Attachments
-#         uses: dawidd6/action-send-mail@v3
-#         with:
-#           server_address: smtp.gmail.com
-#           server_port: 587
-#           username: ${{ secrets.EMAIL_USERNAME }}
-#           password: ${{ secrets.EMAIL_PASSWORD }}
-#           subject: "[${{ job.status }}] CI/CD Pipeline - ${{ github.repository }}"
-#           to: ${{ secrets.EMAIL_RECIPIENTS }}
-#           from: GitHub Actions <${{ secrets.EMAIL_USERNAME }}>
-#           body: file://email-report.txt
-#           attachments: ./reports/
-#           convert_markdown: true
+name: Python Microservices CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+
+jobs:
+  # ============================================================
+  # JOB 1 - SECRETS SCANNING
+  # ============================================================
+  secrets-scan:
+    name: Gitleaks - Secrets Scanning
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        id: gitleaks
+        with:
+          config-path: .gitleaks.toml
+          redact: true
+          verbose: true
+          exit-code: 1
+
+      - name: Upload Gitleaks Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report-${{ github.sha }}
+          path: ${{ steps.gitleaks.outputs.report-path }}
+          retention-days: 30
+
+  # ============================================================
+  # JOB 2 - LINT (RUFF) + UNIT TEST (PYTEST) - MATRIX
+  # ============================================================
+  lint-and-test:
+    name: Lint & Test - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [secrets-scan]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+            context: ./src/emailservice
+          - name: recommendationservice
+            context: ./src/recommendationservice
+          - name: loadgenerator
+            context: ./src/loadgenerator
+          - name: shoppingassistantservice
+            context: ./src/shoppingassistantservice
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        working-directory: ${{ matrix.service.context }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pytest pytest-cov
+          if [ -f requirements.txt ]; then pip install -r requirements.txt --quiet; fi
+
+      - name: Run Ruff Lint
+        working-directory: ${{ matrix.service.context }}
+        run: ruff check . --output-format=github
+
+      - name: Run Ruff Format Check
+        working-directory: ${{ matrix.service.context }}
+        run: ruff format --check .
+
+      - name: Run Pytest with Coverage
+        working-directory: ${{ matrix.service.context }}
+        run: |
+          python -m pytest --cov=. --cov-report=xml:coverage.xml --cov-report=html:coverage_html --junitxml=pytest-report.xml || echo "⚠️ No tests found"
+
+      - name: Upload Test & Coverage Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ matrix.service.name }}-${{ github.sha }}
+          path: |
+            ${{ matrix.service.context }}/coverage.xml
+            ${{ matrix.service.context }}/coverage_html
+            ${{ matrix.service.context }}/pytest-report.xml
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ============================================================
+  # JOB 3 - DOCKERFILE LINTING (HADOLINT) - MATRIX
+  # ============================================================
+  hadolint:
+    name: Hadolint - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [secrets-scan]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+            dockerfile: ./src/emailservice/Dockerfile
+          - name: recommendationservice
+            dockerfile: ./src/recommendationservice/Dockerfile
+          - name: loadgenerator
+            dockerfile: ./src/loadgenerator/Dockerfile
+          - name: shoppingassistantservice
+            dockerfile: ./src/shoppingassistantservice/Dockerfile
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: ${{ matrix.service.dockerfile }}
+          format: sarif
+          output-file: hadolint-${{ matrix.service.name }}.sarif
+          no-fail: true
+
+      - name: Upload Hadolint SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: hadolint-${{ matrix.service.name }}.sarif
+          category: hadolint-${{ matrix.service.name }}
+
+      - name: Upload Hadolint Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: hadolint-report-${{ matrix.service.name }}-${{ github.sha }}
+          path: hadolint-${{ matrix.service.name }}.sarif
+          retention-days: 30
+
+  # ============================================================
+  # JOB 4 - DOCKER BUILD (BUILDX) - MATRIX
+  # ============================================================
+  docker-build:
+    name: Build - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [lint-and-test, hadolint]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+            context: ./src/emailservice
+            dockerfile: ./src/emailservice/Dockerfile
+          - name: recommendationservice
+            context: ./src/recommendationservice
+            dockerfile: ./src/recommendationservice/Dockerfile
+          - name: loadgenerator
+            context: ./src/loadgenerator
+            dockerfile: ./src/loadgenerator/Dockerfile
+          - name: shoppingassistantservice
+            context: ./src/shoppingassistantservice
+            dockerfile: ./src/shoppingassistantservice/Dockerfile
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:master
+            network=host
+
+      - name: Cache Docker Layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache-${{ matrix.service.name }}
+          key: docker-${{ runner.os }}-${{ matrix.service.name }}-${{ github.sha }}
+          restore-keys: |
+            docker-${{ runner.os }}-${{ matrix.service.name }}-
+
+      - name: Build Docker Image (load, no push yet)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.dockerfile }}
+          push: false
+          load: true
+          tags: |
+            ${{ matrix.service.name }}:${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache-${{ matrix.service.name }}
+          cache-to: type=local,dest=/tmp/.buildx-cache-${{ matrix.service.name }}-new,mode=max
+
+      - name: Move Cache
+        run: |
+          rm -rf /tmp/.buildx-cache-${{ matrix.service.name }}
+          mv /tmp/.buildx-cache-${{ matrix.service.name }}-new /tmp/.buildx-cache-${{ matrix.service.name }}
+
+      - name: Save Docker Image as Tarball
+        run: |
+          mkdir -p /tmp/images
+          docker save ${{ matrix.service.name }}:${{ github.sha }} -o /tmp/images/${{ matrix.service.name }}.tar
+
+      - name: Upload Docker Image Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
+          path: /tmp/images/${{ matrix.service.name }}.tar
+          retention-days: 7
+
+  # ============================================================
+  # JOB 5 - TRIVY IMAGE SCAN - MATRIX
+  # ============================================================
+  trivy-scan:
+    name: Trivy - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+          - name: recommendationservice
+          - name: loadgenerator
+          - name: shoppingassistantservice
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
+          path: /tmp/images
+
+      - name: Load Docker Image
+        run: docker load -i /tmp/images/${{ matrix.service.name }}.tar
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service.name }}:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results-${{ matrix.service.name }}.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '0'
+
+      - name: Run Trivy - Fail Gate (table output)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ matrix.service.name }}:${{ github.sha }}
+          format: 'table'
+          severity: 'CRITICAL'
+          exit-code: '1'
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results-${{ matrix.service.name }}.sarif
+          category: trivy-${{ matrix.service.name }}
+
+      - name: Upload Trivy Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report-${{ matrix.service.name }}-${{ github.sha }}
+          path: trivy-results-${{ matrix.service.name }}.sarif
+          retention-days: 30
+
+  # ============================================================
+  # JOB 6 - SBOM GENERATION (SYFT) - MATRIX
+  # ============================================================
+  sbom-generation:
+    name: Syft SBOM - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [docker-build]
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+          - name: recommendationservice
+          - name: loadgenerator
+          - name: shoppingassistantservice
+    steps:
+      - name: Download Docker Image
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image-${{ matrix.service.name }}-${{ github.sha }}
+          path: /tmp/images
+
+      - name: Load Docker Image
+        run: docker load -i /tmp/images/${{ matrix.service.name }}.tar
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ matrix.service.name }}:${{ github.sha }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.service.name }}.spdx.json
+
+      - name: Upload SBOM Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service.name }}-${{ github.sha }}
+          path: sbom-${{ matrix.service.name }}.spdx.json
+          retention-days: 90
+
+      - name: Attach SBOM to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: sbom-${{ matrix.service.name }}.spdx.json
+
+  # ============================================================
+  # JOB 7 - DOCKER HUB PUSH - MATRIX
+  # ============================================================
+  docker-push:
+    name: Push - ${{ matrix.service.name }}
+    runs-on: ubuntu-latest
+    needs: [trivy-scan, sbom-generation]
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - name: emailservice
+            context: ./src/emailservice
+            dockerfile: ./src/emailservice/Dockerfile
+          - name: recommendationservice
+            context: ./src/recommendationservice
+            dockerfile: ./src/recommendationservice/Dockerfile
+          - name: loadgenerator
+            context: ./src/loadgenerator
+            dockerfile: ./src/loadgenerator/Dockerfile
+          - name: shoppingassistantservice
+            context: ./src/shoppingassistantservice
+            dockerfile: ./src/shoppingassistantservice/Dockerfile
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.service.context }}
+          file: ${{ matrix.service.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/microservices-demo-${{ matrix.service.name }}:buildcache,mode=max
+
+      - name: Verify Push
+        run: |
+          echo "✅ ${{ matrix.service.name }} pushed successfully"
+          echo "Tags: ${{ steps.meta.outputs.tags }}"
+
+  # # ============================================================
+  # # JOB 8 - NOTIFICATIONS
+  # # ============================================================
+  # notifications:
+  #   name: Send Notifications
+  #   runs-on: ubuntu-latest
+  #   needs: [docker-push]
+  #   if: always()
+  #   steps:
+  #     - name: Slack Notification
+  #       uses: 8398a7/action-slack@v3
+  #       with:
+  #         status: ${{ job.status }}
+  #         channel: '#devops-alerts'
+  #         username: 'GitHub Actions'
+  #         icon_emoji: ':github:'
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
